@@ -10,6 +10,11 @@ namespace
     constexpr float kStart = MathConstants<float>::pi * 1.25f;
     constexpr float kEnd   = MathConstants<float>::pi * 2.75f;
 
+    bool isSupportedAudio (const File& f)
+    {
+        return f.hasFileExtension ("wav;aif;aiff;flac;mp3");
+    }
+
     Point<float> onCircle (Point<float> c, float ang, float rad)
     {
         return { c.x + rad * std::sin (ang), c.y - rad * std::cos (ang) };
@@ -107,11 +112,6 @@ RollXEditor::RollXEditor (RollXProcessor& p) : AudioProcessorEditor (&p), proc (
     decayA = std::make_unique<SliderAttachment> (proc.apvts, "revDecay",  decay);
     outA   = std::make_unique<SliderAttachment> (proc.apvts, "outGain",   out);
 
-    importBtn.setColour (TextButton::buttonColourId, Colour (0xff1f2125));
-    importBtn.setColour (TextButton::textColourOffId, colText);
-    importBtn.onClick = [this] { chooseSample(); };
-    addAndMakeVisible (importBtn);
-
     rollBtn.setColour (TextButton::buttonColourId, lnf.accent);
     rollBtn.setColour (TextButton::buttonOnColourId, lnf.accent.brighter (0.3f));
     rollBtn.setColour (TextButton::textColourOffId, Colour (0xff1a0a05));
@@ -139,7 +139,6 @@ void RollXEditor::resized()
     out.setBounds   (990, 5, 62, 62);
 
     displayArea = { 328, 84, 424, 176 };
-    importBtn.setBounds (28, 438, 250, 46);
     rollBtn.setBounds   (380, 434, 320, 54);
 }
 
@@ -150,10 +149,69 @@ void RollXEditor::chooseSample()
     chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles,
                           [safe] (const FileChooser& fc)
                           {
-                              const auto f = fc.getResult();
-                              if (safe != nullptr && f.existsAsFile())
-                                  safe->proc.loadSample (f);
+                              if (safe != nullptr)
+                                  safe->loadFile (fc.getResult());
                           });
+}
+
+void RollXEditor::loadFile (const File& f)
+{
+    if (! f.existsAsFile())
+        return;
+
+    if (proc.loadSample (f))
+    {
+        statusMsg.clear();
+        statusTicks = 0;
+    }
+    else
+    {
+        statusMsg = "COULD NOT LOAD " + f.getFileName().toUpperCase() + " (MAX 30 s)";
+        statusTicks = 90;
+    }
+    repaint (displayArea);
+}
+
+void RollXEditor::mouseUp (const MouseEvent& e)
+{
+    // alternativa al drag & drop: un clic sul display apre la scelta del file
+    if (displayArea.contains (e.getPosition()) && ! e.mouseWasDraggedSinceMouseDown())
+        chooseSample();
+}
+
+bool RollXEditor::isInterestedInFileDrag (const StringArray& files)
+{
+    for (const auto& path : files)
+        if (isSupportedAudio (File (path)))
+            return true;
+    return false;
+}
+
+void RollXEditor::fileDragEnter (const StringArray&, int, int)
+{
+    dragOver = true;
+    repaint (displayArea);
+}
+
+void RollXEditor::fileDragExit (const StringArray&)
+{
+    dragOver = false;
+    repaint (displayArea);
+}
+
+void RollXEditor::filesDropped (const StringArray& files, int, int)
+{
+    dragOver = false;
+    for (const auto& path : files)
+    {
+        const File f (path);
+        if (isSupportedAudio (f))
+        {
+            loadFile (f);   // carica subito il primo file valido
+            return;
+        }
+    }
+    repaint (displayArea);
 }
 
 void RollXEditor::refreshPeaks()
@@ -181,6 +239,9 @@ void RollXEditor::refreshPeaks()
 
 void RollXEditor::timerCallback()
 {
+    if (statusTicks > 0 && --statusTicks == 0)
+        statusMsg.clear();
+
     if (proc.getSampleVersion() != shownVersion)
     {
         shownVersion = proc.getSampleVersion();
@@ -201,16 +262,18 @@ void RollXEditor::drawDisplay (Graphics& g, Rectangle<int> r)
 {
     g.setColour (Colour (0xff08090a));
     g.fillRoundedRectangle (r.toFloat(), 8.0f);
-    g.setColour (Colour (0xff2d3035));
-    g.drawRoundedRectangle (r.toFloat().reduced (0.5f), 8.0f, 1.0f);
+    g.setColour (dragOver ? lnf.accent : Colour (0xff2d3035));
+    g.drawRoundedRectangle (r.toFloat().reduced (0.5f), 8.0f, dragOver ? 2.5f : 1.0f);
 
     auto inner = r.reduced (10);
     auto top = inner.removeFromTop (16);
     const int idx = jlimit (0, 6, roundToInt (rate.getValue()));
     const int steps = roundToInt (4.0 / RollXProcessor::rateBeats[idx]);
 
-    drawText (g, proc.getSampleName().isEmpty() ? String ("no sample - press IMPORT") : proc.getSampleName(),
-              top, 11.0f, colText, Justification::centredLeft, false);
+    drawText (g, statusMsg.isNotEmpty() ? statusMsg
+                                        : proc.getSampleName().isEmpty() ? String ("NO SAMPLE LOADED")
+                                                                         : proc.getSampleName(),
+              top, 11.0f, statusMsg.isNotEmpty() ? lnf.accent : colText, Justification::centredLeft, false);
     drawText (g, String (steps) + " steps / bar", top, 11.0f, colDim, Justification::centredRight, false);
 
     inner.removeFromTop (6);
@@ -227,6 +290,14 @@ void RollXEditor::drawDisplay (Graphics& g, Rectangle<int> r)
     }
     g.setColour (Colour (0xff2b2e33));
     g.drawHorizontalLine ((int) cy, (float) wave.getX(), (float) wave.getRight());
+
+    if (peaks.empty())
+    {
+        drawText (g, dragOver ? "RELEASE TO LOAD" : "DROP A SAMPLE HERE", wave.withHeight (wave.getHeight() / 2 + 8),
+                  16.0f, lnf.accent, Justification::centredBottom);
+        drawText (g, "wav / aiff / flac / mp3  -  or click to browse", wave.withTrimmedTop (wave.getHeight() / 2 + 8),
+                  12.0f, colDim, Justification::centredTop, false);
+    }
 
     // colpi del roll con crescendo
     const float phase = proc.rollPhase.load();
@@ -321,6 +392,8 @@ void RollXEditor::paint (Graphics& g)
                   { 908, 372, 120, 18 }, 13.0f, colText);
     }
 
+    drawText (g, "DRAG & DROP A SAMPLE ON THE DISPLAY", { 28, 444, 330, 16 }, 13.0f, colDim, Justification::centredLeft);
+    drawText (g, "OR CLICK THE DISPLAY TO BROWSE", { 28, 464, 330, 16 }, 13.0f, colDim, Justification::centredLeft);
     drawText (g, "HOLD ANY MIDI NOTE TO ROLL", { 740, 444, 312, 16 }, 13.0f, colDim, Justification::centredRight);
     drawText (g, "FOLLOWS HOST BPM", { 740, 464, 312, 16 }, 13.0f, colDim, Justification::centredRight);
 }
